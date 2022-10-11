@@ -173,7 +173,7 @@ class ZipCoder {
     // value of '/', this does not hold in the general case. E.g., in charsets
     // such as UTF-16 and UTF-32 it will be represented by a sequence of 2 or 4
     // bytes, respectively.
-    private byte[] slashBytes() {
+    byte[] slashBytes() {
         if (slashBytes == null) {
             // Take into account charsets that produce a BOM, e.g., UTF-16
             byte[] slash = "/".getBytes(cs);
