@@ -71,6 +71,7 @@ import jdk.internal.misc.VM;
 import jdk.internal.perf.PerfCounter;
 import jdk.internal.ref.CleanerFactory;
 import jdk.internal.vm.annotation.Stable;
+import sun.nio.ch.FileChannelImpl;
 import sun.nio.cs.UTF_8;
 import sun.security.util.SignatureFileVerifier;
 
@@ -1258,18 +1259,8 @@ public class ZipFile implements ZipConstants, Closeable {
         private int readPos;
         private byte[] buffer;
 
-        DirectCEN(RandomAccessFile file, long offset, long len) throws IOException {
-            while (true) {
-                try {
-                    this.directBuffer = file.getChannel().map(FileChannel.MapMode.READ_ONLY, offset, len).load();
-                    break;
-                } catch (ClosedByInterruptException e) {
-                    e.printStackTrace();
-                    // retry
-                } catch (IOException e) {
-                    throw e;
-                }
-            }
+        DirectCEN(FileChannel fileChannel, long offset, long len) throws IOException {
+            this.directBuffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, offset, len).load();
             this.length = len;
             readPos = -1;
             buffer = new byte[CACHE_SIZE];
@@ -1401,7 +1392,16 @@ public class ZipFile implements ZipConstants, Closeable {
     }
 
     private static class Source {
-        private static final boolean USE_DIRECT_CEN = true; // System.getProperty("java.util.zip.ZipFile.useDirectCEN", "false").equals("true");
+        private static boolean USE_DIRECT_CEN;
+        private static long DIRECT_CEN_THRESHOLD;
+
+        static {
+            try {
+                USE_DIRECT_CEN = Boolean.parseBoolean(System.getProperty("java.util.zip.ZipFile.useDirectCEN", "false"));
+                DIRECT_CEN_THRESHOLD = Long.parseLong(System.getProperty("java.util.zip.ZipFile.directCENThreshold", "0"));
+            } catch (NumberFormatException e){
+            }
+        }
 
         // While this is only used from ZipFile, defining it there would cause
         // a bootstrap cycle that would leave this initialized as null
@@ -1766,11 +1766,14 @@ public class ZipFile implements ZipConstants, Closeable {
                     zerror("invalid END header (bad central directory offset)");
                 }
 
-                if (USE_DIRECT_CEN) {
+                if (USE_DIRECT_CEN && (end.cenlen + ENDHDR) >= DIRECT_CEN_THRESHOLD) {
                     try {
-                        cen = this.cen = new DirectCEN(this.zfile, cenpos, (end.cenlen + ENDHDR));
+                        FileChannel fileChannel = this.zfile.getChannel();
+                        if (fileChannel instanceof FileChannelImpl) {
+                            ((FileChannelImpl)fileChannel).setUninterruptible();
+                            cen = this.cen = new DirectCEN(fileChannel, cenpos, (end.cenlen + ENDHDR));
+                        }
                     } catch (IOException e) {
-                        e.printStackTrace();
                         // fallback
                     }
                 }
