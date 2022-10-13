@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2022, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2020 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -48,7 +48,9 @@ chunklevel_t chunklevel::level_fitting_word_size(size_t word_size) {
 void chunklevel::print_chunk_size(outputStream* st, chunklevel_t lvl) {
   if (chunklevel::is_valid_level(lvl)) {
     const size_t s = chunklevel::word_size_for_level(lvl) * BytesPerWord;
-    if (s < 1 * M) {
+    if (s < 1 * K) {
+      st->print("%3ub", (unsigned)(s)); 
+    } else if (s < 1 * M) {
       st->print("%3uk", (unsigned)(s / K));
     } else {
       st->print("%3um", (unsigned)(s / M));

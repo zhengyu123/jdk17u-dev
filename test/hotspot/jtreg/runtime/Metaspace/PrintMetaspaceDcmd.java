@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2018, SAP and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -25,6 +25,7 @@
 import jdk.test.lib.process.ProcessTools;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.JDKToolFinder;
+import jdk.test.lib.Platform;
 
 /*
  * @test id=test-64bit-ccs
@@ -148,6 +149,10 @@ public class PrintMetaspaceDcmd {
         pb.command(new String[] { JDKToolFinder.getJDKTool("jcmd"), pid, "VM.metaspace", "by-chunktype"});
         output = new OutputAnalyzer(pb.start());
         output.shouldHaveExitValue(0);
+        if (Platform.is32bit()) {
+            output.shouldContain("256b:");
+            output.shouldContain("512b:");
+        }
         output.shouldContain("1k:");
         output.shouldContain("2k:");
         output.shouldContain("4k:");
@@ -159,8 +164,10 @@ public class PrintMetaspaceDcmd {
         output.shouldContain("256k:");
         output.shouldContain("512k:");
         output.shouldContain("1m:");
-        output.shouldContain("2m:");
-        output.shouldContain("4m:");
+        if (Platform.is64bit()) {
+            output.shouldContain("2m:");
+            output.shouldContain("4m:");
+        }
 
         pb.command(new String[] { JDKToolFinder.getJDKTool("jcmd"), pid, "VM.metaspace", "vslist"});
         output = new OutputAnalyzer(pb.start());

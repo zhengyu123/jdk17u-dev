@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2022, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2020 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -67,7 +67,7 @@ typedef signed char chunklevel_t;
 
 namespace chunklevel {
 
-static const size_t   MAX_CHUNK_BYTE_SIZE    = 4 * M;
+static const size_t   MAX_CHUNK_BYTE_SIZE    = LP64_ONLY(4 * M) NOT_LP64 (M);
 static const int      NUM_CHUNK_LEVELS       = 13;
 static const size_t   MIN_CHUNK_BYTE_SIZE    = (MAX_CHUNK_BYTE_SIZE >> ((size_t)NUM_CHUNK_LEVELS - 1));
 
