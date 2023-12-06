@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -54,7 +54,6 @@
 #include "gc/shared/taskTerminator.hpp"
 #include "gc/shared/weakProcessor.inline.hpp"
 #include "gc/shared/workerPolicy.hpp"
-#include "gc/shared/workgroup.hpp"
 #include "memory/iterator.hpp"
 #include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
@@ -88,7 +87,6 @@ static void scavenge_roots_work(ParallelRootType::Value root_type, uint worker_i
   assert(ParallelScavengeHeap::heap()->is_gc_active(), "called outside gc");
 
   PSPromotionManager* pm = PSPromotionManager::gc_thread_promotion_manager(worker_id);
-  PSScavengeRootsClosure roots_closure(pm);
   PSPromoteRootsClosure  roots_to_old_closure(pm);
 
   switch (root_type) {
@@ -164,13 +162,13 @@ public:
   }
 
   template <class T> void do_oop_work(T* p) {
-    assert (oopDesc::is_oop(RawAccess<IS_NOT_NULL>::oop_load(p)),
-            "expected an oop while scanning weak refs");
+     assert (oopDesc::is_oop(RawAccess<IS_NOT_NULL>::oop_load(p)),
+             "expected an oop while scanning weak refs");
 
-    // Weak refs may be visited more than once.
-    if (PSScavenge::should_scavenge(p, _to_space)) {
-      _promotion_manager->copy_and_push_safe_barrier</*promote_immediately=*/false>(p);
-    }
+     // Weak refs may be visited more than once.
+     if (PSScavenge::should_scavenge(p, _to_space)) {
+       _promotion_manager->copy_and_push_safe_barrier</*promote_immediately=*/false>(p);
+     }
   }
   virtual void do_oop(oop* p)       { PSKeepAliveClosure::do_oop_work(p); }
   virtual void do_oop(narrowOop* p) { PSKeepAliveClosure::do_oop_work(p); }
@@ -285,7 +283,7 @@ class ScavengeRootsTask : public AbstractGangTask {
   PSOldGen* _old_gen;
   HeapWord* _gen_top;
   uint _active_workers;
-  bool _is_empty;
+  bool _is_old_gen_empty;
   TaskTerminator _terminator;
 
 public:
@@ -299,14 +297,19 @@ public:
       _old_gen(old_gen),
       _gen_top(gen_top),
       _active_workers(active_workers),
-      _is_empty(is_empty),
+      _is_old_gen_empty(is_empty),
       _terminator(active_workers, PSPromotionManager::vm_thread_promotion_manager()->stack_array_depth()) {
+
+    if (!_is_old_gen_empty) {
+      PSCardTable* card_table = ParallelScavengeHeap::heap()->card_table();
+      card_table->pre_scavenge(_old_gen->object_space()->bottom(), active_workers);
+    }
   }
 
   virtual void work(uint worker_id) {
     ResourceMark rm;
 
-    if (!_is_empty) {
+    if (!_is_old_gen_empty) {
       // There are only old-to-young pointers if there are objects
       // in the old gen.
 
@@ -320,8 +323,9 @@ public:
         PSPromotionManager* pm = PSPromotionManager::gc_thread_promotion_manager(worker_id);
         PSCardTable* card_table = ParallelScavengeHeap::heap()->card_table();
 
+        // The top of the old gen changes during scavenge when objects are promoted.
         card_table->scavenge_contents_parallel(_old_gen->start_array(),
-                                               _old_gen->object_space(),
+                                               _old_gen->object_space()->bottom(),
                                                _gen_top,
                                                pm,
                                                worker_id,

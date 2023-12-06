@@ -128,6 +128,11 @@ inline void PSPromotionManager::push_contents(oop obj) {
   }
 }
 
+inline void PSPromotionManager::push_contents_bounded(oop obj, HeapWord* left, HeapWord* right) {
+  PSPushContentsClosure pcc(this);
+  obj->oop_iterate(&pcc, MemRegion(left, right));
+}
+
 template<bool promote_immediately>
 inline oop PSPromotionManager::copy_to_survivor_space(oop o) {
   assert(should_scavenge(&o), "Sanity");
@@ -326,7 +331,7 @@ inline void PSPromotionManager::copy_and_push_safe_barrier(T* p) {
   if ((!PSScavenge::is_obj_in_young((HeapWord*)p)) &&
       ParallelScavengeHeap::heap()->is_in_reserved(p)) {
     if (PSScavenge::is_obj_in_young(new_obj)) {
-      PSScavenge::card_table()->inline_write_ref_field_gc(p, new_obj);
+      PSScavenge::card_table()->inline_write_ref_field_gc(p);
     }
   }
 }

@@ -33,15 +33,35 @@ class ObjectStartArray;
 class PSPromotionManager;
 
 class PSCardTable: public CardTable {
- private:
-  // Support methods for resizing the card table.
-  // resize_commit_uncommit() returns true if the pages were committed or
-  // uncommitted
-  bool resize_commit_uncommit(int changed_region, MemRegion new_region);
-  void resize_update_card_table_entries(int changed_region,
-                                        MemRegion new_region);
-  void resize_update_committed_table(int changed_region, MemRegion new_region);
-  void resize_update_covered_table(int changed_region, MemRegion new_region);
+  friend class PSStripeShadowCardTable;
+  static constexpr size_t num_cards_in_stripe = 128;
+  static_assert(num_cards_in_stripe >= 1, "progress");
+
+  volatile int _preprocessing_active_workers;
+
+  bool is_dirty(CardValue* card) {
+    return !is_clean(card);
+  }
+
+  bool is_clean(CardValue* card) {
+    return *card == clean_card_val();
+  }
+
+  // Iterate the stripes with the given index and copy imprecise card marks of
+  // objects reaching into a stripe to its first card.
+  template <typename Func>
+  void preprocess_card_table_parallel(Func&& object_start,
+                                      HeapWord* old_gen_bottom,
+                                      HeapWord* old_gen_top,
+                                      uint stripe_index,
+                                      uint n_stripes);
+
+  // Scavenge contents on dirty cards of the given stripe [start, end).
+  template <typename Func>
+  void process_range(Func&& object_start,
+                     PSPromotionManager* pm,
+                     HeapWord* const start,
+                     HeapWord* const end);
 
   void verify_all_young_refs_precise_helper(MemRegion mr);
 
@@ -50,19 +70,27 @@ class PSCardTable: public CardTable {
     verify_card       = CT_MR_BS_last_reserved + 5
   };
 
+  void scan_obj_with_limit(PSPromotionManager* pm,
+                           oop obj,
+                           HeapWord* start,
+                           HeapWord* end);
+
  public:
-  PSCardTable(MemRegion whole_heap) : CardTable(whole_heap) {}
+  PSCardTable(MemRegion whole_heap) : CardTable(whole_heap),
+                                      _preprocessing_active_workers(0) {}
 
   static CardValue youngergen_card_val() { return youngergen_card; }
   static CardValue verify_card_val()     { return verify_card; }
 
   // Scavenge support
+  void pre_scavenge(HeapWord* old_gen_bottom, uint active_workers);
+  // Scavenge contents of stripes with the given index.
   void scavenge_contents_parallel(ObjectStartArray* start_array,
-                                  MutableSpace* sp,
-                                  HeapWord* space_top,
+                                  HeapWord* old_gen_bottom,
+                                  HeapWord* old_gen_top,
                                   PSPromotionManager* pm,
-                                  uint stripe_number,
-                                  uint stripe_total);
+                                  uint stripe_index,
+                                  uint n_stripes);
 
   bool addr_is_marked_imprecise(void *addr);
   bool addr_is_marked_precise(void *addr);
@@ -76,26 +104,13 @@ class PSCardTable: public CardTable {
   static bool card_is_verify(int value)     { return value == verify_card; }
 
   // Card marking
-  void inline_write_ref_field_gc(void* field, oop new_val) {
+  void inline_write_ref_field_gc(void* field) {
     CardValue* byte = byte_for(field);
     *byte = youngergen_card;
   }
 
   // ReduceInitialCardMarks support
   bool is_in_young(oop obj) const;
-
-  // Adaptive size policy support
-  // Allows adjustment of the base and size of the covered regions
-  void resize_covered_region(MemRegion new_region);
-  // Finds the covered region to resize based on the start address
-  // of the covered regions.
-  void resize_covered_region_by_start(MemRegion new_region);
-  // Finds the covered region to resize based on the end address
-  // of the covered regions.
-  void resize_covered_region_by_end(int changed_region, MemRegion new_region);
-  // Finds the lowest start address of a covered region that is
-  // previous (i.e., lower index) to the covered region with index "ind".
-  HeapWord* lowest_prev_committed_start(int ind) const;
 
 #ifdef ASSERT
   bool is_valid_card_address(CardValue* addr) {
