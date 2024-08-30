@@ -32,6 +32,9 @@
 #include "gc/g1/g1RemSet.hpp"
 #include "gc/g1/heapRegionRemSet.hpp"
 #include "gc/shared/ageTable.hpp"
+#include "gc/shared/copyFailedInfo.hpp"
+#include "gc/shared/gc_globals.hpp"
+#include "gc/shared/partialArrayState.hpp"
 #include "gc/shared/partialArrayTaskStepper.hpp"
 #include "gc/shared/stringdedup/stringDedup.hpp"
 #include "gc/shared/taskqueue.hpp"
@@ -82,7 +85,8 @@ class G1ParScanThreadState : public CHeapObj<mtGC> {
   // available for allocation.
   bool _old_gen_is_full;
   // Size (in elements) of a partial objArray task chunk.
-  int _partial_objarray_chunk_size;
+  size_t _partial_objarray_chunk_size;
+  PartialArrayStateAllocator* _partial_array_state_allocator;
   PartialArrayTaskStepper _partial_array_stepper;
   StringDedup::Requests _string_dedup_requests;
 
@@ -112,7 +116,8 @@ public:
                        uint worker_id,
                        uint n_workers,
                        size_t young_cset_length,
-                       size_t optional_cset_length);
+                       size_t optional_cset_length,
+                       PartialArrayStateAllocator* partial_array_state_allocator);
   virtual ~G1ParScanThreadState();
 
   void set_ref_discoverer(ReferenceDiscoverer* rd) { _scanner.set_ref_discoverer(rd); }
@@ -123,7 +128,7 @@ public:
 
   void verify_task(narrowOop* task) const NOT_DEBUG_RETURN;
   void verify_task(oop* task) const NOT_DEBUG_RETURN;
-  void verify_task(PartialArrayScanTask task) const NOT_DEBUG_RETURN;
+  void verify_task(PartialArrayState* task) const NOT_DEBUG_RETURN;
   void verify_task(ScannerTask task) const NOT_DEBUG_RETURN;
 
   void push_on_queue(ScannerTask task);
@@ -168,7 +173,7 @@ public:
   size_t flush(size_t* surviving_young_words);
 
 private:
-  void do_partial_array(PartialArrayScanTask task);
+  void do_partial_array(PartialArrayState* state);
   void start_partial_objarray(G1HeapRegionAttr dest_dir, oop from, oop to);
 
   HeapWord* allocate_copy_slow(G1HeapRegionAttr* dest_attr,
@@ -247,6 +252,7 @@ class G1ParScanThreadStateSet : public StackObj {
   size_t _optional_cset_length;
   uint _n_workers;
   bool _flushed;
+  PartialArrayStateAllocator _partial_array_state_allocator;
 
  public:
   G1ParScanThreadStateSet(G1CollectedHeap* g1h,

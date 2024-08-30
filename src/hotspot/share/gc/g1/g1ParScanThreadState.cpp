@@ -31,6 +31,7 @@
 #include "gc/g1/g1RootClosures.hpp"
 #include "gc/g1/g1StringDedup.hpp"
 #include "gc/g1/g1Trace.hpp"
+#include "gc/shared/partialArrayState.hpp"
 #include "gc/shared/partialArrayTaskStepper.inline.hpp"
 #include "gc/shared/stringdedup/stringDedup.hpp"
 #include "gc/shared/taskqueue.inline.hpp"
@@ -38,6 +39,7 @@
 #include "oops/access.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/atomic.hpp"
+#include "runtime/mutexLocker.hpp"
 #include "runtime/prefetch.inline.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include "utilities/macros.hpp"
@@ -55,7 +57,8 @@ G1ParScanThreadState::G1ParScanThreadState(G1CollectedHeap* g1h,
                                            uint worker_id,
                                            uint n_workers,
                                            size_t young_cset_length,
-                                           size_t optional_cset_length)
+                                           size_t optional_cset_length,
+                                           PartialArrayStateAllocator* pas_allocator)
   : _g1h(g1h),
     _task_queue(g1h->task_queue(worker_id)),
     _rdc_local_qset(rdcqs),
@@ -74,8 +77,8 @@ G1ParScanThreadState::G1ParScanThreadState(G1CollectedHeap* g1h,
     _surviving_young_words(NULL),
     _surviving_words_length(young_cset_length + 1),
     _old_gen_is_full(false),
-    _partial_objarray_chunk_size(ParGCArrayScanChunk),
-    _partial_array_stepper(n_workers),
+    _partial_array_state_allocator(pas_allocator),
+    _partial_array_stepper(n_workers, ParGCArrayScanChunk),
     _string_dedup_requests(),
     _num_optional_regions(optional_cset_length),
     _numa(g1h->numa()),
@@ -153,9 +156,9 @@ void G1ParScanThreadState::verify_task(oop* task) const {
          "task=" PTR_FORMAT " p=" PTR_FORMAT, p2i(task), p2i(p));
 }
 
-void G1ParScanThreadState::verify_task(PartialArrayScanTask task) const {
+void G1ParScanThreadState::verify_task(PartialArrayState* task) const {
   // Must be in the collection set--it's already been copied.
-  oop p = task.to_source_array();
+  oop p = task->source();
   assert(_g1h->is_in_cset(p), "p=" PTR_FORMAT, p2i(p));
 }
 
@@ -164,8 +167,8 @@ void G1ParScanThreadState::verify_task(ScannerTask task) const {
     verify_task(task.to_narrow_oop_ptr());
   } else if (task.is_oop_ptr()) {
     verify_task(task.to_oop_ptr());
-  } else if (task.is_partial_array_task()) {
-    verify_task(task.to_partial_array_task());
+  } else if (task.is_partial_array_state()) {
+    verify_task(task.to_partial_array_state());
   } else {
     ShouldNotReachHere();
   }
@@ -207,24 +210,29 @@ void G1ParScanThreadState::do_oop_evac(T* p) {
 }
 
 MAYBE_INLINE_EVACUATION
-void G1ParScanThreadState::do_partial_array(PartialArrayScanTask task) {
-  oop from_obj = task.to_source_array();
+void G1ParScanThreadState::do_partial_array(PartialArrayState* state) {
+  oop to_obj = state->destination();
 
+#ifdef ASSERT
+  oop from_obj = state->source();
   assert(_g1h->is_in_reserved(from_obj), "must be in heap.");
   assert(from_obj->is_objArray(), "must be obj array");
   assert(from_obj->is_forwarded(), "must be forwarded");
-
-  oop to_obj = from_obj->forwardee();
   assert(from_obj != to_obj, "should not be chunking self-forwarded objects");
   assert(to_obj->is_objArray(), "must be obj array");
+#endif // ASSERT
+
   objArrayOop to_array = objArrayOop(to_obj);
 
-  PartialArrayTaskStepper::Step step
-    = _partial_array_stepper.next(objArrayOop(from_obj),
-                                  to_array,
-                                  _partial_objarray_chunk_size);
-  for (uint i = 0; i < step._ncreate; ++i) {
-    push_on_queue(ScannerTask(PartialArrayScanTask(from_obj)));
+  // Claim a chunk and get number of additional tasks to enqueue.
+  PartialArrayTaskStepper::Step step = _partial_array_stepper.next(state);
+  // Push any additional partial scan tasks needed.  Pushed before processing
+  // the claimed chunk to allow other workers to steal while we're processing.
+  if (step._ncreate > 0) {
+    state->add_references(step._ncreate);
+    for (uint i = 0; i < step._ncreate; ++i) {
+      push_on_queue(ScannerTask(state));
+    }
   }
 
   HeapRegion* hr = _g1h->heap_region_containing(to_array);
@@ -233,8 +241,10 @@ void G1ParScanThreadState::do_partial_array(PartialArrayScanTask task) {
   // fortunately the iteration ignores the length field and just relies
   // on start/end.
   to_array->oop_iterate_range(&_scanner,
-                              step._index,
-                              step._index + _partial_objarray_chunk_size);
+                              checked_cast<int>(step._index),
+                              checked_cast<int>(step._index + _partial_array_stepper.chunk_size()));
+  // Release reference to the state, now that we're done with it.
+  _partial_array_state_allocator->release(_worker_id, state);
 }
 
 MAYBE_INLINE_EVACUATION
@@ -244,28 +254,37 @@ void G1ParScanThreadState::start_partial_objarray(G1HeapRegionAttr dest_attr,
   assert(from_obj->is_objArray(), "precondition");
   assert(from_obj->is_forwarded(), "precondition");
   assert(from_obj->forwardee() == to_obj, "precondition");
-  assert(from_obj != to_obj, "should not be scanning self-forwarded objects");
   assert(to_obj->is_objArray(), "precondition");
 
   objArrayOop to_array = objArrayOop(to_obj);
 
-  PartialArrayTaskStepper::Step step
-    = _partial_array_stepper.start(objArrayOop(from_obj),
-                                   to_array,
-                                   _partial_objarray_chunk_size);
+  size_t array_length = to_array->length();
+  PartialArrayTaskStepper::Step step = _partial_array_stepper.start(array_length);
 
   // Push any needed partial scan tasks.  Pushed before processing the
   // intitial chunk to allow other workers to steal while we're processing.
-  for (uint i = 0; i < step._ncreate; ++i) {
-    push_on_queue(ScannerTask(PartialArrayScanTask(from_obj)));
+  if (step._ncreate > 0) {
+    assert(step._index < array_length, "invariant");
+    assert(((array_length - step._index) % _partial_array_stepper.chunk_size()) == 0,
+           "invariant");
+    PartialArrayState* state =
+      _partial_array_state_allocator->allocate(_worker_id,
+                                               from_obj, to_obj,
+                                               step._index,
+                                               array_length,
+                                               step._ncreate);
+    for (uint i = 0; i < step._ncreate; ++i) {
+      push_on_queue(ScannerTask(state));
+    }
+  } else {
+    assert(step._index == array_length, "invariant");
   }
 
   G1ScanInYoungSetter x(&_scanner, dest_attr.is_young());
   // Process the initial chunk.  No need to process the type in the
   // klass, as it will already be handled by processing the built-in
-  // module. The length of to_array is not correct, but fortunately
-  // the iteration ignores that length field and relies on start/end.
-  to_array->oop_iterate_range(&_scanner, 0, step._index);
+  // module.
+  to_array->oop_iterate_range(&_scanner, 0, checked_cast<int>(step._index));
 }
 
 MAYBE_INLINE_EVACUATION
@@ -276,7 +295,7 @@ void G1ParScanThreadState::dispatch_task(ScannerTask task) {
   } else if (task.is_oop_ptr()) {
     do_oop_evac(task.to_oop_ptr());
   } else {
-    do_partial_array(task.to_partial_array_task());
+    do_partial_array(task.to_partial_array_state());
   }
 }
 
@@ -538,7 +557,8 @@ G1ParScanThreadState* G1ParScanThreadStateSet::state_for_worker(uint worker_id) 
     _states[worker_id] =
       new G1ParScanThreadState(_g1h, _rdcqs,
                                worker_id, _n_workers,
-                               _young_cset_length, _optional_cset_length);
+                               _young_cset_length, _optional_cset_length,
+                               &_partial_array_state_allocator);
   }
   return _states[worker_id];
 }
@@ -658,7 +678,8 @@ G1ParScanThreadStateSet::G1ParScanThreadStateSet(G1CollectedHeap* g1h,
     _young_cset_length(young_cset_length),
     _optional_cset_length(optional_cset_length),
     _n_workers(n_workers),
-    _flushed(false) {
+    _flushed(false),
+    _partial_array_state_allocator(n_workers) {
   for (uint i = 0; i < n_workers; ++i) {
     _states[i] = NULL;
   }
