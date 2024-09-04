@@ -28,6 +28,7 @@
 #include "gc/parallel/psPromotionLAB.hpp"
 #include "gc/shared/copyFailedInfo.hpp"
 #include "gc/shared/gcTrace.hpp"
+#include "gc/shared/partialArrayTaskStepper.hpp"
 #include "gc/shared/preservedMarks.hpp"
 #include "gc/shared/taskqueue.hpp"
 #include "memory/padded.hpp"
@@ -48,6 +49,8 @@
 class MutableSpace;
 class PSOldGen;
 class ParCompactionManager;
+class PartialArrayState;
+class PartialArrayStateAllocator;
 
 class PSPromotionManager {
   friend class PSScavenge;
@@ -86,7 +89,9 @@ class PSPromotionManager {
   bool                                _totally_drain;
   uint                                _target_stack_size;
 
-  uint                                _array_chunk_size;
+  static PartialArrayStateAllocator*  _partial_array_state_allocator;
+  PartialArrayTaskStepper             _partial_array_stepper;
+  uint                                _partial_array_state_allocator_index;
   uint                                _min_array_size_for_chunking;
 
   PreservedMarks*                     _preserved_marks;
@@ -100,7 +105,8 @@ class PSPromotionManager {
 
   template <class T> void  process_array_chunk_work(oop obj,
                                                     int start, int end);
-  void process_array_chunk(PartialArrayScanTask task);
+  void process_array_chunk(PartialArrayState* state);
+  void push_objArray(oop old_obj, oop new_obj);
 
   void push_depth(ScannerTask task);
 

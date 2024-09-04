@@ -276,9 +276,7 @@ inline oop PSPromotionManager::copy_unmarked_to_survivor_space(oop o,
     if (new_obj_size > _min_array_size_for_chunking &&
         new_obj->is_objArray() &&
         PSChunkLargeArrays) {
-      // we'll chunk it
-      push_depth(ScannerTask(PartialArrayScanTask(o)));
-      TASKQUEUE_STATS_ONLY(++_arrays_chunked; ++_array_chunk_pushes);
+      push_objArray(o, new_obj);
     } else {
       // we'll just push its contents
       push_contents(new_obj);
@@ -330,9 +328,9 @@ inline void PSPromotionManager::copy_and_push_safe_barrier(T* p) {
 }
 
 inline void PSPromotionManager::process_popped_location_depth(ScannerTask task) {
-  if (task.is_partial_array_task()) {
+  if (task.is_partial_array_state()) {
     assert(PSChunkLargeArrays, "invariant");
-    process_array_chunk(task.to_partial_array_task());
+    process_array_chunk(task.to_partial_array_state());
   } else {
     if (task.is_narrow_oop_ptr()) {
       assert(UseCompressedOops, "Error");
@@ -349,7 +347,7 @@ inline bool PSPromotionManager::steal_depth(int queue_num, ScannerTask& t) {
 
 #if TASKQUEUE_STATS
 void PSPromotionManager::record_steal(ScannerTask task) {
-  if (task.is_partial_array_task()) {
+  if (task.is_partial_array_state()) {
     ++_array_chunk_steals;
   }
 }
